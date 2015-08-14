@@ -1,9 +1,9 @@
 CC = gcc
-CFLAGS = -g -Wall
-LDFLAGS = -g -Wall
-LIBS = -ljson
+CFLAGS += -g -Wall
+LDFLAGS += -g -Wall
+LIBS += -ljson-c
 
-OBJS = autovfr.c
+OBJS = autovfr.o
 
 PROGRAM = autovfr
 
@@ -16,4 +16,4 @@ $(PROGRAM): $(OBJS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f autovfr
+	rm -f autovfr $(OBJS)
