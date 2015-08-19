@@ -18,22 +18,29 @@ char *logfile = '\0';
 char *jsonfile = '\0';
 
 typedef struct {
+	int index;
+	int pair_a;
+	int pair_b;
+	int result_cadence;
+} pair_data;
+
+typedef struct {
 	unsigned long total_frames;
 	unsigned long total_dwframes;
 	unsigned long dw_size;
 	int *comb_list;
 	int *crop_comb_list;
 	int *move_comb_list;
+	unsigned long dw_blocks;
+	pair_data *pair;
 } frame_data;
 
 const int blank_cadence[] = {0,0,0,0,0,0,0,0,0,0};
 const int telop_cadence[] = {1,1,1,1,1,1,1,1,1,1};
-const int deint_cadence[] = {0,1,0,1,0,1,0,1,0,1};
+const int deint01_cadence[] = {0,1,0,1,0,1,0,1,0,1};
+const int deint02_cadence[] = {1,0,1,0,1,0,1,0,1,0};
+const int deint_half_cadence[] = {0,1,0,1,0,1};
 
-int current_cadence = -1;
-int before_cadence  = -1;
-int count = 0;
-int count_ok = 0;
 int bob_flag = 0;
 int last_index_number = 0;
 
@@ -64,6 +71,7 @@ int skip_num = 1;
 int skip_pair = 3;
 int enable_bob = 0;
 int bob_area_frames = 0;
+int detect_comb_num = 3;
 
 int verbose = 0;
 
@@ -71,6 +79,16 @@ int verbose = 0;
 #define DEBUG_INFO 0
 #define DEBUG_DEBUG 1
 #define DEBUG_HUGE 2
+#define DEBUG_SHOW_COMB 4
+
+#define TELECIDE_TYPE_REF0 0
+#define TELECIDE_TYPE_REF1 1
+#define TELECIDE_TYPE_REF2 2
+#define TELECIDE_TYPE_REF3 3
+#define TELECIDE_TYPE_REF4 4
+#define TELECIDE_TYPE_NONE 5
+#define TELECIDE_TYPE_BOB  6
+#define TELECIDE_TYPE_DINT 7
 
 void debug_print(int level, const char * format, ...) {
 	va_list b;
@@ -100,13 +118,17 @@ void test_parse_obj_to_string(struct json_object* const obj) {
 }
 
 void free_data(frame_data *d) {
+	free(d->pair);
 	free(d->comb_list);
 	free(d->crop_comb_list);
 	free(d->move_comb_list);
 	free(d);
 }
 
-int read_file(const char *filename, frame_data *d) {
+//
+//ログファイル読み込み
+//
+int read_file(const char *filename, frame_data *d) { //{{{
 	FILE *fp;
 	char buf[512];
 	char first_line[512];
@@ -138,25 +160,26 @@ int read_file(const char *filename, frame_data *d) {
 	fclose(fp);
 	return 1;
 }
+//}}}
 
 void get_ref_string(const int ref_type, char **ref_str) {
 	switch (ref_type) {
 		case 0:
-			*ref_str = "pref0";
+			*ref_str = "pref_0";
 			break;
 		case 1:
-			*ref_str = "pref1";
+			*ref_str = "pref_1";
 			break;
 		case 2:
-			*ref_str = "pref2";
+			*ref_str = "pref_2";
 			break;
 		case 3:
-			*ref_str = "pref3";
+			*ref_str = "pref_3";
 			break;
 		case 4:
-			*ref_str = "pref4";
+			*ref_str = "pref_4";
 			break;
-		case 5:
+		case 6:
 			*ref_str = "bob";
 			break;
 		default:
@@ -165,7 +188,10 @@ void get_ref_string(const int ref_type, char **ref_str) {
 	}
 }
 
-int create_json(const frame_data *f, const cadence_data *c, json_object *output) {
+//
+//jsonオブジェクトを生成します
+//
+int create_json(const frame_data *f, const cadence_data *c, json_object *output) { //{{{
 	int i;
 	//new
 	json_object *cadence_list = json_object_new_array();
@@ -224,8 +250,12 @@ int create_json(const frame_data *f, const cadence_data *c, json_object *output)
 	json_object_object_add(output, "comb", comb_list);
 	return 1;
 }
+//}}}
 
-int write_json(const char *filename, json_object *obj) {
+//
+//json書き込み
+//
+int write_json(const char *filename, json_object *obj) { //{{{
 	FILE *fp;
 	fp = fopen(filename, "wt");
 	if (!fp) {
@@ -236,19 +266,24 @@ int write_json(const char *filename, json_object *obj) {
 	fclose(fp);
 	return 1;
 }
+//}}}
 
 void show_help() {
 	debug_print(DEBUG_INFO, "./autovfr -i [autovfr logfile]\n");
 	debug_print(DEBUG_INFO, "オプション\n");
 	debug_print(DEBUG_INFO, "-i [filename]\t\t入力AutoVFRログファイルパス\n");
 	debug_print(DEBUG_INFO, "-o [filename]\t\t出力JSONファイル\n");
+	debug_print(DEBUG_INFO, "--comb-num [num]\t60iとなる縞数を指定します。[%d]\n", detect_comb_num);
 	debug_print(DEBUG_INFO, "--skip [num]\t\tスキップ数[%d](*** DOESN'T WORK ***)\n", skip_num);
 	debug_print(DEBUG_INFO, "--verbose [num]\t\t詳細なログを表示します[%d]\n", verbose);
 	debug_print(DEBUG_INFO, "--bob\t\t\tBOBを有効にします(テロップ,ANIME+がある場合は必須)\n");
 	debug_print(DEBUG_INFO, "--bob-area [num]\tBOBの範囲を広げます[%d](*** DOESN'T WORK ***)\n", bob_area_frames);
 }
 
-int parse_args(int argc, char** argv) {
+//
+//引数解析
+//
+int parse_args(int argc, char** argv) { //{{{
 	int i;
 	for (i = 1; i < argc; i++) {
 		int next = 0;
@@ -283,6 +318,14 @@ int parse_args(int argc, char** argv) {
 						if (strtol(argv[i + 1], (char **) NULL, 10) != 0) {
 							bob_area_frames = strtol(argv[i + 1], (char **) NULL, 10);
 						}
+					} else if (strcmp(argv[i] + 2, "comb-num") == 0) {
+						if (i == (argc - 1)) {
+							fprintf(stderr, "引数が違います。\n");
+							return 0;
+						}
+						if (strtol(argv[i + 1], (char **) NULL, 10) != 0) {
+							detect_comb_num = strtol(argv[i + 1], (char **) NULL, 10);
+						}
 					}
 					break;
 				case 'i':
@@ -314,145 +357,238 @@ int parse_args(int argc, char** argv) {
 	}
 	return 1;
 }
+//}}}
 
-int get_cadence(const int index, int *d, int *changed_index, int *changed_cadence) {
+//
+//BOBフレームパターンを確認します。
+//連続する縞数detect_comb_num以上でBOBと判定します。
+//
+int _check_comb_pattern(int *d) { //{{{
+	int i;
+	int count = 0;
+	int bits = 0;
+	for (i = 0; i < 10; i++) {
+		if (i == 0 || count == 0) bits = d[i];
+		bits &= d[i];
+		if (bits) count++;
+		if (!bits) count = 0;
+		if (count >= detect_comb_num) {
+			debug_print(DEBUG_HUGE, "comb detected ");
+			return 1;
+		}
+	}
+	return 0;
+}
+//}}}
+
+//
+//ログファイルを解析して5フレーム(=10フィールド)ごとに周期リストを作成します。
+//
+int _get_cadence(const int index, int *d, pair_data *p) { //{{{
 	int cur = -1;
-	int changed = 0;
 	int pair_a = -1;
 	int pair_b = -1;
+	debug_print(DEBUG_SHOW_COMB, " %d%d%d%d%d%d%d%d%d%d ", d[index], d[index + 1], d[index + 2], d[index + 3], d[index + 4], d[index + 5], d[index + 6], d[index + 7], d[index + 8], d[index + 9]);
+	if (memcmp(d + index, blank_cadence, sizeof(int) * 10) == 0) {
+		//no move.
+		cur = TELECIDE_TYPE_NONE;
+		pair_a = cur; pair_b = cur;
+	} else if (memcmp(d + index, telop_cadence, sizeof(int) * 10) == 0) {
+		//TELOP.
+		cur = TELECIDE_TYPE_BOB;
+		pair_a = cur; pair_b = cur;
+	} else if (memcmp(d + index, deint01_cadence, sizeof(int) * 10) == 0 || memcmp(d + index, deint02_cadence, sizeof(int) * 10) == 0) {
+		//deint (full detected)
+		debug_print(DEBUG_HUGE, " deint ");
+		cur = TELECIDE_TYPE_DINT;
+		pair_a = cur; pair_b = cur;
+	} else if (memcmp(d + index, deint_half_cadence, sizeof(int) * 6) == 0) {
+		//deint (half detected)
+		debug_print(DEBUG_HUGE, " deint ");
+		cur = TELECIDE_TYPE_DINT;
+		pair_a = cur; pair_b = cur;
+	} else if (d[index] || d[index + 5]) {
+		//may 3 or 4
+		pair_a = TELECIDE_TYPE_REF3; pair_b = TELECIDE_TYPE_REF4;
+		if (d[index + 2] || d[index + 7]) {
+			//4
+			cur = pair_b;
+		} else if (d[index + 3] || d[index + 8]) {
+			//3
+			cur = pair_a;
+		}
+	} else if (d[index + 1] || d[index + 6]) {
+		//may 1 or 2
+		pair_a = TELECIDE_TYPE_REF1; pair_b = TELECIDE_TYPE_REF2;
+		if (d[index + 3] || d[index + 8]) {
+			//2
+			cur = pair_b;
+		} else if (d[index + 4] || d[index + 9]) {
+			//1
+			cur = pair_a;
+		}
+	} else if (d[index + 2] || d[index + 7]) {
+		//may 0 or 4
+		pair_a = TELECIDE_TYPE_REF0; pair_b = TELECIDE_TYPE_REF4;
+		if (d[index] || d[index + 5]) {
+			//4
+			cur = pair_b;
+		} else if (d[index + 4] || d[index + 9]) {
+			//0
+			cur = pair_a;
+		}
+	} else if (d[index + 3] || d[index + 8]) {
+		//may 2 or 3
+		pair_a = TELECIDE_TYPE_REF2; pair_b = TELECIDE_TYPE_REF3;
+		if (d[index] || d[index + 5]) {
+			//3
+			cur = pair_b;
+		} else if(d[index + 1] || d[index + 6]) {
+			//2
+			cur = pair_a;
+		}
+	} else if (d[index + 4] || d[index + 9]) {
+		//may 0 or 1
+		pair_a = TELECIDE_TYPE_REF0; pair_b = TELECIDE_TYPE_REF1;
+		if (d[index + 1] || d[index + 6]) {
+			//1
+			cur = pair_b;
+		} else if (d[index + 2] || d[index + 7]) {
+			//0
+			cur = pair_a;
+		}
+	} else {
+		//unknown?
+		debug_print(DEBUG_INFO, "[[%d Unknown]]\n", index);
+	}
+	if (_check_comb_pattern(d + index)) {
+		cur = TELECIDE_TYPE_BOB;
+		pair_a = cur; pair_b = cur;
+	}
+	debug_print(DEBUG_HUGE, "[[%d - (%d:%d) = %d]]\n", index, pair_a, pair_b, cur);
+	p->pair_a = pair_a;
+	p->pair_b = pair_b;
+	p->result_cadence = cur;
+	return 0;
+}
+//}}}
+
+//
+//2015.08.22版アルゴリズム(大まかな解析)
+//シーンチェンジ1000まで
+//
+int analyse_cadence(frame_data *d, cadence_data *c) { //{{{
+	int i;
+	int dw_blocks = d->dw_blocks;
+	int current_cadence = -1;
+	int before_cadence  = -1;
+	int detect_cadence  = -1;
 	int max_key = -1;
 	int max_val = -1;
-	int has_pair = 0;
-	int bob = 0;
-	int no_move = 0;
-	if (memcmp(d + index, blank_cadence, sizeof(int) * 10) == 0) {
-		debug_print(DEBUG_HUGE, "%d - n before(%d)\n", index, before_cadence);
-		if (current_cadence != -1) cur = current_cadence;
-		no_move = 1;
-	} else if (memcmp(d + index, telop_cadence, sizeof(int) * 10) == 0) {
-		debug_print(DEBUG_HUGE, "%d - t\n", index);
-		bob = 1;
-		if (current_cadence != -1) cur = current_cadence;
-	} else if ((d[index + 2] && d[index + 4]) || (d[index + 7] && d[index + 9])) {
-		debug_print(DEBUG_HUGE, "%d - 0\n", index);
-		cur = 0;
-	} else if ((d[index + 1] && d[index + 4]) || (d[index + 6] && d[index + 9])) {
-		debug_print(DEBUG_HUGE, "%d - 1\n", index);
-		cur = 1;
-	} else if ((d[index + 1] && d[index + 3]) || (d[index + 6] && d[index + 8])) {
-		debug_print(DEBUG_HUGE, "%d - 2\n", index);
-		cur = 2;
-	} else if ((d[index    ] && d[index + 3]) || (d[index + 5] && d[index + 8])) {
-		debug_print(DEBUG_HUGE, "%d - 3\n", index);
-		cur = 3;
-	} else if ((d[index    ] && d[index + 2]) || (d[index + 5] && d[index + 7])) {
-		debug_print(DEBUG_HUGE, "%d - 4\n", index);
-		cur = 4;
-	} else if (d[index] || d[index + 5]) {
-		debug_print(DEBUG_HUGE, "%d - 3 or 4\n", index);
-		has_pair = 1;
-		pair_a = 3;
-		pair_b = 4;
-	} else if (d[index + 1] || d[index + 6]) {
-		debug_print(DEBUG_HUGE, "%d - 1 or 2\n", index);
-		has_pair = 1;
-		pair_a = 3;
-		pair_a = 1;
-		pair_b = 2;
-	} else if (d[index + 2] || d[index + 7]) {
-		debug_print(DEBUG_HUGE, "%d - 0 or 4\n", index);
-		has_pair = 1;
-		pair_a = 3;
-		pair_a = 0;
-		pair_b = 4;
-	} else if (d[index + 3] || d[index + 8]) {
-		debug_print(DEBUG_HUGE, "%d - 2 or 3\n", index);
-		has_pair = 1;
-		pair_a = 3;
-		pair_a = 2;
-		pair_b = 3;
-	} else if (d[index + 4] || d[index + 9]) {
-		debug_print(DEBUG_HUGE, "%d - 0 or 1\n", index);
-		has_pair = 1;
-		pair_a = 3;
-		pair_a = 0;
-		pair_b = 1;
-	} else {
-		printf("%d - ------\n", index);
-	}
-	if (bob == 1 && bob_flag == 0) {
-		bob_flag = 1;
-		debug_print(DEBUG_DEBUG, "%d bob start.\n", index);
-		if (enable_bob) {
-			changed = 1;
-			*changed_index = index;
-			*changed_cadence = 5;
-		}
-	} else if (bob == 0 && bob_flag == 1) {
-		bob_flag = 0;
-		debug_print(DEBUG_DEBUG, "%d bob end.\n", index);
-		if (enable_bob) {
-			changed = 1;
-			*changed_index = index;
-			*changed_cadence = current_cadence;
-		}
-	}
-	if (cur != -1 && before_cadence != cur && count_ok == 1) {
-		debug_print(DEBUG_DEBUG, "*");
-		count_ok = 0;
-		count = 0;
-		last_index_number = index;
-	} else if (cur != -1 && before_cadence == cur && count_ok == 0) {
-		count++;
-	}
-	if (count >= skip_num) {
-		count_ok = 1;
-		count = 0;
-		if (current_cadence != cur) {
-			debug_print(DEBUG_DEBUG, "%d Cadence %d -> %d\n", last_index_number, current_cadence, cur);
-			current_cadence = cur;
-			changed = 1;
-			*changed_index = last_index_number;
-			*changed_cadence = current_cadence;
-		}
-	}
+	pair_data *pd = d->pair;
+	int seq_threshold = 3; //check count
+	int pair_seq_threshold = 3; //check pair count = seq_threshold + pair_seq_threshold
+	int pair_max_skip_value = 2; //skip missing pair
+	int seq_count = 0;
+	int seq_count_lock = 0;
+	int missing_flag = 0;
+	int pair_counter[] = {0,0,0,0,0};
+	int p_count = 0;
+	int changed_count = 0;
+	int changed_index[1000] = {0};
+	int changed_cadence[1000] = {0};
 
-	if (has_pair) {
-		if (before_cadence == pair_a || before_cadence == pair_b) {
-			cur = before_cadence;
-		} else {
-			if (current_cadence == pair_a || current_cadence == pair_b) {
-				cur = current_cadence;
-			} else {
-				pair_count[pair_a]++;
-				pair_count[pair_b]++;
-				p_count++;
-				if (p_count == 1) last_index_number = index;
-				debug_print(DEBUG_DEBUG, "%d [%d:%d:%d:%d:%d]\n",index, pair_count[0], pair_count[1], pair_count[2], pair_count[3], pair_count[4]);
-				if (p_count >= skip_pair) {
-					get_max_pair(pair_count, &max_key, &max_val);
-					debug_print(DEBUG_DEBUG, "%d Changed %d -> %d (count:%d)\n", last_index_number, current_cadence, max_key, max_val);
-					p_count = 0;
-					current_cadence = max_key;
-					cur = max_key;
-					changed = 1;
-					*changed_index = last_index_number;
-					*changed_cadence = current_cadence;
-					memset(&pair_count, 0, sizeof(int) * 5);
+	int detected_index = 0;
+
+	for (i = 0; i < dw_blocks; i++) {
+		max_key = -1; max_val = -1;
+		pair_data before_data;
+		//pair_data next_data;
+		pair_data cur_data = pd[i];
+		current_cadence = cur_data.result_cadence;
+		if (i != 0) {
+			before_data = pd[i - 1];
+			before_cadence = before_data.result_cadence;
+		}
+
+		if (detect_cadence != -1 && current_cadence == TELECIDE_TYPE_NONE) current_cadence = detect_cadence;
+		if (detect_cadence != -1 && before_cadence == TELECIDE_TYPE_NONE) before_cadence = detect_cadence;
+		if (detect_cadence != -1 && current_cadence == -1) {
+			// check pair //
+			if (detect_cadence == cur_data.pair_a) current_cadence = cur_data.pair_a;
+			if (detect_cadence == cur_data.pair_b) current_cadence = cur_data.pair_b;
+			if (detect_cadence != cur_data.pair_a && detect_cadence != cur_data.pair_b) {
+				debug_print(DEBUG_INFO, "%d pair missing. [%d:%d:%d:%d:%d]\n", i, pair_counter[0], pair_counter[1], pair_counter[2], pair_counter[3], pair_counter[4]);
+				missing_flag = 1;
+			}
+			if (p_count >= seq_threshold + pair_seq_threshold) {
+				get_max_pair(pair_counter, &max_key, &max_val);
+				if (detect_cadence != max_key && max_key != TELECIDE_TYPE_NONE && max_val > pair_max_skip_value) {
+					debug_print(DEBUG_INFO, "%d(%d) detected(pair) %d -> %d\n", i, detected_index, detect_cadence, max_key);
+					changed_index[changed_count] = detected_index * 10;
+					changed_cadence[changed_count] = max_key;
+					changed_count++;
+					detect_cadence = max_key;
+					current_cadence = detect_cadence;
 				}
+				memset(pair_counter, 0, sizeof(int) * 5);
+				missing_flag = 0;
+				p_count = 0;
+				seq_count = 0;
+				seq_count_lock = 1;
 			}
 		}
-	} else {
-		memset(&pair_count, 0, sizeof(int) * 5);
-		p_count = 0;
+
+		if (detect_cadence != current_cadence && seq_count_lock) {
+			debug_print(DEBUG_INFO, "%d changed?\n", i);
+			detected_index = i;
+			seq_count = 0;
+			seq_count_lock = 0;
+		}
+		debug_print(DEBUG_DEBUG, "%d [%d:%d] = %d b:%d c:%d seq:%d (%d)\n", i, cur_data.pair_a, cur_data.pair_b, cur_data.result_cadence, before_cadence, current_cadence, seq_count, detect_cadence);
+
+		if (current_cadence != -1 && current_cadence == before_cadence && seq_count_lock == 0) {
+			seq_count++;
+			if (seq_count >= seq_threshold) {
+				if (detect_cadence != current_cadence && current_cadence != TELECIDE_TYPE_NONE) {
+					debug_print(DEBUG_INFO, "%d(%d) detected %d -> %d\n", i, detected_index, detect_cadence, current_cadence);
+					detect_cadence = current_cadence;
+					if (changed_count == 0) detected_index = 0;
+					changed_index[changed_count] = detected_index * 10;
+					changed_cadence[changed_count] = current_cadence;
+					changed_count++;
+					memset(pair_counter, 0, sizeof(int) * 5);
+					missing_flag = 0;
+					p_count = 0;
+				}
+				seq_count = 0;
+				seq_count_lock = 1;
+			}
+		} else if (seq_count_lock == 0) {
+			seq_count = 0;
+			seq_count_lock = 0;
+		}
+		if (missing_flag && current_cadence != TELECIDE_TYPE_NONE) {
+			pair_counter[cur_data.pair_a]++;
+			pair_counter[cur_data.pair_b]++;
+			p_count++;
+		}
 	}
-	if (!no_move)
-		before_cadence = cur;
+	c->cadence_count = changed_count;
+	c->cadence_index = malloc(sizeof(int) * changed_count);
+	c->cadence_num = malloc(sizeof(int) * changed_count);
+	for (i = 0; i < changed_count; i++) {
+		memcpy(c->cadence_index + i, changed_index + i, sizeof(int));
+		memcpy(c->cadence_num + i, changed_cadence + i, sizeof(int));
+		debug_print(DEBUG_INFO, "Pulldown_cadence: %d Changed frame: %d\n", changed_cadence[i], changed_index[i] / 2);
+	}
+	debug_print(DEBUG_INFO, "Scene %d Detected.\n", changed_count);
 
-	return changed;
+	return 0;
 }
+//}}}
 
-int analyse_sima(int index, int *d, int cur_cadence, comb_data *comb) {
+int analyse_sima(int index, int *d, int cur_cadence, comb_data *comb) { //{{{
 	int cur = -1;
 	int has_pair = 0;
 	int pair_a = -1;
@@ -527,21 +663,11 @@ int analyse_sima(int index, int *d, int cur_cadence, comb_data *comb) {
 	}
 	return is_comb;
 }
-
-void reset_cadence() {
-	current_cadence = -1;
-	before_cadence = -1;
-	count_ok = 0;
-	count = 0;
-	last_index_number = 0;
-}
+//}}}
 
 int main(int argc, char** argv) {
 	int ret;
 	int i;
-	int changed_count = 0;
-	int changed_index = -1;
-	int changed_cadence = -1;
 	frame_data *data;
 	cadence_data *c_data;
 	c_data = malloc(sizeof(cadence_data));
@@ -560,87 +686,24 @@ int main(int argc, char** argv) {
 	}
 	fprintf(stdout, "Total frames:%ld\n", data->total_frames);
 	fprintf(stdout, "Total dw frames:%ld\n", data->total_dwframes);
-	//dump
-	fprintf(stdout, "----------周期リスト----------\n");
-	for (i = 0; i < data->dw_size; i+=10) {
-		ret = get_cadence(i, data->comb_list, &changed_index, &changed_cadence);
-		if (ret) {
-			changed_count++;
-		}
-	}
-	c_data->cadence_count = changed_count;
-	c_data->cadence_index = malloc(sizeof(int) * changed_count);
-	c_data->cadence_num = malloc(sizeof(int) * changed_count);
-	reset_cadence();
+	data->dw_blocks = data->total_dwframes / 10;
+	data->pair = malloc(sizeof(pair_data) * data->dw_blocks);
+
 	int j = 0;
 	for (i = 0; i < data->dw_size; i+=10) {
-		ret = get_cadence(i, data->comb_list, &changed_index, &changed_cadence);
-		if (ret) {
-			c_data->cadence_index[j] = changed_index;
-			c_data->cadence_num[j] = changed_cadence;
-			if (j == 0) c_data->cadence_index[j] = 0;
-			j++;
-		}
+		_get_cadence(i, data->comb_list, data->pair + j);
+		j++;
 	}
-	fprintf(stdout, "周期数:%d\n", c_data->cadence_count);
-	int next_frame = 0;
-	for (i = 0; i < c_data->cadence_count; i++) {
-		if (i == c_data->cadence_count - 1) {
-			next_frame = data->dw_size;
-		} else {
-			next_frame = c_data->cadence_index[i + 1];
-		}
-		if (c_data->cadence_num[i] == 5) {
-			fprintf(stdout, "%d-%d BOB\n", c_data->cadence_index[i] / 2, next_frame / 2 - 1);
-		} else {
-			fprintf(stdout, "%d-%d ref(%d)\n", c_data->cadence_index[i] / 2, next_frame / 2 - 1, c_data->cadence_num[i]);
-		}
-	}
-	fprintf(stdout, "----------解除縞リスト----------\n");
-	int comb_count = 0;
-	int cur_index = 0;
-	int current_cadence = -1;
-	comb_data *comb = malloc(sizeof(comb));
-	for (i = 0; i < data->dw_size; i+=10) {
-		if(i >= c_data->cadence_index[cur_index + 1] && cur_index + 1 < c_data->cadence_count)
-			cur_index++;
-		current_cadence = c_data->cadence_num[cur_index];
-		ret = analyse_sima(i, data->comb_list, current_cadence, comb);
-		if (ret) comb_count++;
-	}
-	fprintf(stdout, "Comb: %d\n", comb_count);
-	c_data->comb = malloc(sizeof(comb_data) * comb_count);
-	c_data->comb_count = comb_count;
-	cur_index = 0;
-	current_cadence = -1;
-	j = 0;
-	for (i = 0; i < data->dw_size; i+=10) {
-		if (i >= c_data->cadence_index[cur_index + 1] && cur_index + 1 < c_data->cadence_count)
-			cur_index++;
-		current_cadence = c_data->cadence_num[cur_index];
-		ret = analyse_sima(i, data->comb_list, current_cadence, comb);
-		if (ret) {
-			memcpy(c_data->comb + j, comb, sizeof(comb_data));
-			j++;
-		}
-	}
-	for (i = 0; i < c_data->comb_count; i++) {
-		comb_data c = c_data->comb[i];
-		if (c.comb_has_pair) {
-			fprintf(stdout, "%d Comb ref(%d) 周期候補[%d:%d]\n", c.comb_frame / 2, c.comb_current_cadence, c.comb_pair_a, c.comb_pair_b);
-		} else {
-			fprintf(stdout, "%d Comb ref(%d) 候補(%d)\n", c.comb_frame / 2, c.comb_current_cadence, c.comb_ref);
-		}
-	}
+	analyse_cadence(data, c_data);
+	c_data->comb_count = 0;
+	c_data->comb = malloc(sizeof(comb_data));
 	json_object *object = json_object_new_object();
 	create_json(data, c_data, object);
 	if (object && jsonfile) {
 		ret = write_json(jsonfile, object);
-		if (ret) {
-			fprintf(stdout, "JSONファイルに書き込みました\n");
-		}
+		if (ret)
+			fprintf(stdout, "JSONファイルに書き込みました。\n");
 	}
-	free(comb);
 	free(c_data->comb);
 	free(c_data->cadence_num);
 	free(c_data->cadence_index);
