@@ -48,13 +48,9 @@ int pair_count[] = {0, 0, 0, 0, 0};
 int p_count = 0;
 
 typedef struct {
+	/* comb list after Detected cadence */
 	int comb_frame;
 	int comb_current_cadence;
-	int comb_ref;
-	/* Pair */
-	int comb_has_pair;
-	int comb_pair_a;
-	int comb_pair_b;
 } comb_data;
 
 typedef struct {
@@ -67,10 +63,9 @@ typedef struct {
 	comb_data *comb;
 } cadence_data;
 
-int skip_num = 1;
+int seq_threshold = 3;
 int skip_pair = 3;
 int enable_bob = 0;
-int bob_area_frames = 0;
 int detect_comb_num = 3;
 
 int verbose = 0;
@@ -193,57 +188,55 @@ void get_ref_string(const int ref_type, char **ref_str) {
 //
 int create_json(const frame_data *f, const cadence_data *c, json_object *output) { //{{{
 	int i;
-	//new
 	json_object *cadence_list = json_object_new_array();
 	json_object *comb_list = json_object_new_array();
+	int start_frame = 0;
 	int end_frame = 0;
+	int bob_ivtc60mc_ref = -1;
+	int cur_cadence = -1;
 	char *cadence_str[16];
 	char *cur_cadence_str[16];
-	char *diff_cadence_str[16];
 	//create cadence data
 	for (i = 0; i < c->cadence_count; i++) {
+		cur_cadence = c->cadence_num[i];
 		if (i == c->cadence_count - 1) {
 			end_frame = f->dw_size;
+			if (!enable_bob && cur_cadence == TELECIDE_TYPE_BOB) cur_cadence = c->cadence_num[i - 1];
 		} else {
 			end_frame = c->cadence_index[i + 1];
+			if (!enable_bob && cur_cadence == TELECIDE_TYPE_BOB) cur_cadence = c->cadence_num[i + 1];
 		}
-		get_ref_string(c->cadence_num[i], cadence_str);
+		get_ref_string(cur_cadence, cadence_str);
 		json_object *cadence = json_object_new_object();
-		json_object *start = json_object_new_int(c->cadence_index[i] / 2);
+		json_object *start = json_object_new_int(start_frame);
 		json_object *end = json_object_new_int(end_frame / 2 - 1);
 		json_object *ref = json_object_new_string(*cadence_str);
+		json_object *bob_60mc_ref= json_object_new_int(-1);
+		if (enable_bob && cur_cadence == TELECIDE_TYPE_BOB) {
+			//TODO 前か後ろか決めるのは引数にする？(基本は後周期)
+			if (i == c->cadence_count - 1) {
+				bob_ivtc60mc_ref = c->cadence_num[i - 1];
+			} else {
+				bob_ivtc60mc_ref = c->cadence_num[i + 1];
+			}
+		}
+		if (c->cadence_num[i] == TELECIDE_TYPE_BOB) bob_60mc_ref = json_object_new_int(bob_ivtc60mc_ref);
 		json_object_object_add(cadence, "start", start);
 		json_object_object_add(cadence, "end", end);
 		json_object_object_add(cadence, "type", ref);
+		if (c->cadence_num[i] == TELECIDE_TYPE_BOB && enable_bob) json_object_object_add(cadence, "txt60mc_type", bob_60mc_ref);
 		json_object_array_add(cadence_list, cadence);
+		if (i != c->cadence_count - 1) start_frame = c->cadence_index[i + 1] / 2;
 	}
 	//create comb data
 	for (i = 0 ;i < c->comb_count; i++) {
 		comb_data cm = c->comb[i];
 		get_ref_string(cm.comb_current_cadence,cur_cadence_str);
 		json_object *comb = json_object_new_object();
-		json_object *frame = json_object_new_int(cm.comb_frame / 2);
+		json_object *frame = json_object_new_int(cm.comb_frame);
 		json_object *current_ref = json_object_new_string(*cur_cadence_str);
-		json_object *b_pair = json_object_new_boolean(cm.comb_has_pair);
-		*diff_cadence_str = "-";
-		json_object *diff_ref = json_object_new_string("-");
-		json_object *i_pair_a = json_object_new_int(-1);
-		json_object *i_pair_b = json_object_new_int(-1);
-		if (cm.comb_has_pair) {
-			i_pair_a = json_object_new_int(cm.comb_pair_a);
-			i_pair_b = json_object_new_int(cm.comb_pair_b);
-		} else {
-			get_ref_string(cm.comb_ref, diff_cadence_str);
-			diff_ref = json_object_new_string(*diff_cadence_str);
-		}
 		json_object_object_add(comb, "frame", frame);
 		json_object_object_add(comb, "type", current_ref);
-		json_object_object_add(comb, "have-pair", b_pair);
-		json_object_object_add(comb, "ref", diff_ref);
-		if (cm.comb_has_pair) {
-			json_object_object_add(comb, "pair-a", i_pair_a);
-			json_object_object_add(comb, "pair-b", i_pair_b);
-		}
 		json_object_array_add(comb_list, comb);
 	}
 	json_object_object_add(output, "cadence", cadence_list);
@@ -268,17 +261,21 @@ int write_json(const char *filename, json_object *obj) { //{{{
 }
 //}}}
 
-void show_help() {
+//
+//ヘルプ
+//
+void show_help() { //{{{
 	debug_print(DEBUG_INFO, "./autovfr -i [autovfr logfile]\n");
 	debug_print(DEBUG_INFO, "オプション\n");
 	debug_print(DEBUG_INFO, "-i [filename]\t\t入力AutoVFRログファイルパス\n");
 	debug_print(DEBUG_INFO, "-o [filename]\t\t出力JSONファイル\n");
+	debug_print(DEBUG_INFO, "--bob\t\t\tBOBを有効にします(テロップ,ANIME+がある場合は必須)\n\n");
+	debug_print(DEBUG_INFO, "* 高度なオプション(全体的に試験的、かつ取り扱い注意)\n");
 	debug_print(DEBUG_INFO, "--comb-num [num]\t60iとなる縞数を指定します。[%d]\n", detect_comb_num);
-	debug_print(DEBUG_INFO, "--skip [num]\t\tスキップ数[%d](*** DOESN'T WORK ***)\n", skip_num);
+	debug_print(DEBUG_INFO, "--skip [num]\t\tスキップ数[%d]\n", seq_threshold);
 	debug_print(DEBUG_INFO, "--verbose [num]\t\t詳細なログを表示します[%d]\n", verbose);
-	debug_print(DEBUG_INFO, "--bob\t\t\tBOBを有効にします(テロップ,ANIME+がある場合は必須)\n");
-	debug_print(DEBUG_INFO, "--bob-area [num]\tBOBの範囲を広げます[%d](*** DOESN'T WORK ***)\n", bob_area_frames);
 }
+//}}}
 
 //
 //引数解析
@@ -297,8 +294,7 @@ int parse_args(int argc, char** argv) { //{{{
 							return 0;
 						}
 						if (strtol(argv[i + 1], (char **) NULL, 10) != 0) {
-							skip_num = strtol(argv[i + 1], (char **) NULL, 10);
-							skip_pair = skip_num + 2;
+							seq_threshold = strtol(argv[i + 1], (char **) NULL, 10);
 						}
 					} else if (strcmp(argv[i] + 2, "verbose") == 0) {
 						if (i == (argc - 1)) {
@@ -310,14 +306,6 @@ int parse_args(int argc, char** argv) { //{{{
 						}
 					} else if (strcmp(argv[i] + 2, "bob") == 0 ) {
 						enable_bob = 1;
-					} else if (strcmp(argv[i] + 2, "bob-area") == 0) {
-						if (i == (argc - 1)) {
-							fprintf(stderr, "引数が違います。\n");
-							return 0;
-						}
-						if (strtol(argv[i + 1], (char **) NULL, 10) != 0) {
-							bob_area_frames = strtol(argv[i + 1], (char **) NULL, 10);
-						}
 					} else if (strcmp(argv[i] + 2, "comb-num") == 0) {
 						if (i == (argc - 1)) {
 							fprintf(stderr, "引数が違います。\n");
@@ -486,7 +474,6 @@ int analyse_cadence(frame_data *d, cadence_data *c) { //{{{
 	int max_key = -1;
 	int max_val = -1;
 	pair_data *pd = d->pair;
-	int seq_threshold = 3; //check count
 	int pair_seq_threshold = 3; //check pair count = seq_threshold + pair_seq_threshold
 	int pair_max_skip_value = 2; //skip missing pair
 	int seq_count = 0;
@@ -518,13 +505,13 @@ int analyse_cadence(frame_data *d, cadence_data *c) { //{{{
 			if (detect_cadence == cur_data.pair_a) current_cadence = cur_data.pair_a;
 			if (detect_cadence == cur_data.pair_b) current_cadence = cur_data.pair_b;
 			if (detect_cadence != cur_data.pair_a && detect_cadence != cur_data.pair_b) {
-				debug_print(DEBUG_INFO, "%d pair missing. [%d:%d:%d:%d:%d]\n", i, pair_counter[0], pair_counter[1], pair_counter[2], pair_counter[3], pair_counter[4]);
+				debug_print(DEBUG_DEBUG, "%d pair missing. [%d:%d:%d:%d:%d]\n", i, pair_counter[0], pair_counter[1], pair_counter[2], pair_counter[3], pair_counter[4]);
 				missing_flag = 1;
 			}
 			if (p_count >= seq_threshold + pair_seq_threshold) {
 				get_max_pair(pair_counter, &max_key, &max_val);
 				if (detect_cadence != max_key && max_key != TELECIDE_TYPE_NONE && max_val > pair_max_skip_value) {
-					debug_print(DEBUG_INFO, "%d(%d) detected(pair) %d -> %d\n", i, detected_index, detect_cadence, max_key);
+					debug_print(DEBUG_DEBUG, "%d(%d) detected(pair) %d -> %d\n", i, detected_index, detect_cadence, max_key);
 					changed_index[changed_count] = detected_index * 10;
 					changed_cadence[changed_count] = max_key;
 					changed_count++;
@@ -540,7 +527,7 @@ int analyse_cadence(frame_data *d, cadence_data *c) { //{{{
 		}
 
 		if (detect_cadence != current_cadence && seq_count_lock) {
-			debug_print(DEBUG_INFO, "%d changed?\n", i);
+			debug_print(DEBUG_DEBUG, "%d changed?\n", i);
 			detected_index = i;
 			seq_count = 0;
 			seq_count_lock = 0;
@@ -551,7 +538,7 @@ int analyse_cadence(frame_data *d, cadence_data *c) { //{{{
 			seq_count++;
 			if (seq_count >= seq_threshold) {
 				if (detect_cadence != current_cadence && current_cadence != TELECIDE_TYPE_NONE) {
-					debug_print(DEBUG_INFO, "%d(%d) detected %d -> %d\n", i, detected_index, detect_cadence, current_cadence);
+					debug_print(DEBUG_DEBUG, "%d(%d) detected %d -> %d\n", i, detected_index, detect_cadence, current_cadence);
 					detect_cadence = current_cadence;
 					if (changed_count == 0) detected_index = 0;
 					changed_index[changed_count] = detected_index * 10;
@@ -580,14 +567,92 @@ int analyse_cadence(frame_data *d, cadence_data *c) { //{{{
 	for (i = 0; i < changed_count; i++) {
 		memcpy(c->cadence_index + i, changed_index + i, sizeof(int));
 		memcpy(c->cadence_num + i, changed_cadence + i, sizeof(int));
-		debug_print(DEBUG_INFO, "Pulldown_cadence: %d Changed frame: %d\n", changed_cadence[i], changed_index[i] / 2);
 	}
-	debug_print(DEBUG_INFO, "Scene %d Detected.\n", changed_count);
+	return 0;
+}
+//}}}
+
+//
+//2015.08.24版
+//
+int _analyse_sima(frame_data *d, cadence_data *c) { //{{{
+	int i;
+	int j = 0;
+	int cur_cadence = -1;
+	int k = 0;
+	int frame_count = 0;
+	int c_size = -1;
+	comb_data *comb_newptr = NULL;
+	for (i = 0; i < d->total_dwframes; i+=10) {
+		if (i >= c->cadence_index[j + 1] && j + 1 < c->cadence_count)
+			j++;
+		cur_cadence = c->cadence_num[j];
+		pair_data pd = d->pair[k];
+		int *pos = d->comb_list + i;
+		int comb_pattern[4] = {0};
+		int is_comb = 0;
+		int l = 0;
+		if (pd.result_cadence != TELECIDE_TYPE_DINT && pd.result_cadence != TELECIDE_TYPE_BOB) {
+			if (cur_cadence == TELECIDE_TYPE_REF0 && (pos[0] || pos[3] || pos[6] || pos[8])) {
+				is_comb = 1;
+				comb_pattern[0] = pos[0]; comb_pattern[1] = pos[3];
+				comb_pattern[2] = pos[6]; comb_pattern[3] = pos[8];
+			} else if (cur_cadence == TELECIDE_TYPE_REF1 && (pos[0] || pos[2] || pos[5] || pos[8])) {
+				is_comb = 1;
+				comb_pattern[0] = pos[0]; comb_pattern[1] = pos[2];
+				comb_pattern[2] = pos[5]; comb_pattern[3] = pos[8];
+			} else if (cur_cadence == TELECIDE_TYPE_REF2 && (pos[0] || pos[2] || pos[4] || pos[7])) {
+				is_comb = 1;
+				comb_pattern[0] = pos[0]; comb_pattern[1] = pos[2];
+				comb_pattern[2] = pos[4]; comb_pattern[3] = pos[7];
+			} else if (cur_cadence == TELECIDE_TYPE_REF3 && (pos[2] || pos[4] || pos[6] || pos[9])) {
+				is_comb = 1;
+				comb_pattern[0] = pos[2]; comb_pattern[1] = pos[4];
+				comb_pattern[2] = pos[6]; comb_pattern[3] = pos[9];
+			} else if (cur_cadence == TELECIDE_TYPE_REF4 && (pos[1] || pos[4] || pos[6] || pos[8])) {
+				is_comb = 1;
+				comb_pattern[0] = pos[1]; comb_pattern[1] = pos[4];
+				comb_pattern[2] = pos[6]; comb_pattern[3] = pos[8];
+			}
+		}
+		debug_print(DEBUG_DEBUG, "%d(%d) %d%d%d%d%d%d%d%d%d%d \n", i, frame_count, pos[0], pos[1], pos[2], pos[3], pos[4], pos[5], pos[6], pos[7], pos[8], pos[9]);
+		for (l = 0; l < 4; l++) {
+			if (is_comb && comb_pattern[l]) {
+				if (c->comb_count >= c_size) {
+					c_size += 512;
+					if (c->comb_count == 0) {
+						c->comb = malloc(sizeof(comb_data) * c_size);
+					} else {
+						comb_newptr = realloc(c->comb, sizeof(comb_data) * c_size);
+						if (comb_newptr == NULL) {
+							debug_print(DEBUG_INFO, "Can't reallocate memory.\n");
+							return 1;
+						}
+						c->comb = comb_newptr;
+					}
+				}
+				comb_data *comb = malloc(sizeof(comb_data));
+				comb->comb_frame = frame_count + l;
+				comb->comb_current_cadence = cur_cadence;
+				debug_print(DEBUG_DEBUG, "%d comb (%d)\n", frame_count + l, cur_cadence);
+				memcpy(c->comb + c->comb_count, comb, sizeof(comb_data));
+				c->comb_count++;
+			}
+		}
+		frame_count += 4;
+		k++;
+	}
+	if (comb_newptr != NULL) {
+		free(comb_newptr);
+	}
 
 	return 0;
 }
 //}}}
 
+//
+//旧判定コード
+//Deprecated
 int analyse_sima(int index, int *d, int cur_cadence, comb_data *comb) { //{{{
 	int cur = -1;
 	int has_pair = 0;
@@ -650,6 +715,7 @@ int analyse_sima(int index, int *d, int cur_cadence, comb_data *comb) { //{{{
 	//create SIMA data.
 	comb->comb_frame = index;
 	comb->comb_current_cadence = cur_cadence;
+	/*
 	if (has_pair) {
 		comb->comb_ref = -1;
 		comb->comb_has_pair = has_pair;
@@ -661,6 +727,7 @@ int analyse_sima(int index, int *d, int cur_cadence, comb_data *comb) { //{{{
 		comb->comb_pair_a = -1;
 		comb->comb_pair_b = -1;
 	}
+	*/
 	return is_comb;
 }
 //}}}
@@ -697,6 +764,27 @@ int main(int argc, char** argv) {
 	analyse_cadence(data, c_data);
 	c_data->comb_count = 0;
 	c_data->comb = malloc(sizeof(comb_data));
+	_analyse_sima(data, c_data);
+	fprintf(stdout, "-----------周期リスト----------\n");
+	int cur_cadence = -1;
+	int start_frame = 0;
+	int end_frame = -1;
+	for (i = 0; i < c_data->cadence_count; i++) {
+		cur_cadence = c_data->cadence_num[i];
+		if (i == c_data->cadence_count - 1) {
+			end_frame = data->total_dwframes / 2 - 1;
+			if (!enable_bob && cur_cadence == TELECIDE_TYPE_BOB) cur_cadence = c_data->cadence_num[i - 1];
+		} else {
+			end_frame = c_data->cadence_index[i + 1] / 2 - 1;
+			if (!enable_bob && cur_cadence == TELECIDE_TYPE_BOB) cur_cadence = c_data->cadence_num[i + 1];
+		}
+		fprintf(stdout, "pcadence:%d frame:%d-%d\n", cur_cadence, start_frame, end_frame);
+		if (i != c_data->cadence_count - 1) start_frame = c_data->cadence_index[i + 1] / 2;
+	}
+	fprintf(stdout, "----------縞リスト----------\n");
+	for (i = 0; i < c_data->comb_count; i++) {
+		fprintf(stdout, "pcadence:%d comb:%d\n", c_data->comb[i].comb_current_cadence, c_data->comb[i].comb_frame);
+	}
 	json_object *object = json_object_new_object();
 	create_json(data, c_data, object);
 	if (object && jsonfile) {
